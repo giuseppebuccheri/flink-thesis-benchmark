@@ -37,9 +37,6 @@ Once the containers are in the **Up** state, you can access the following servic
 
 The core benchmark script is written in PyFlink (`/jobs/flink_benchmark.py`) and tests three distinct scenarios: *Low Selectivity Filter*, *High Selectivity Point Lookup*, and *Stateful Aggregation*.
 
-###Running the Benchmarks
-The core benchmark script is written in PyFlink (/jobs/flink_benchmark.py) and tests three distinct scenarios: Low Selectivity Filter, High Selectivity Point Lookup, and Stateful Aggregation.
-
 Methodology Note (State vs. Data): Unlike database benchmarks that require thousands of looped queries to measure state retrieval latency, Flink is tested as a continuous stream processing engine. The script is executed once, ingesting and processing the entire 300,000-row dataset in a single pass to accurately measure sustained throughput (Op rate).
 ```bash
 docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py
