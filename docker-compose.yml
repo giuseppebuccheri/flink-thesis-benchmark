@@ -1,0 +1,70 @@
+services:
+  # --- 1. APACHE FLINK ---
+# --- 1. APACHE FLINK ---
+  flink-jobmanager:
+    build: .
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081" 
+      - "7070:7070" 
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - |
+        FLINK_PROPERTIES=
+        env.java.opts.jobmanager: -javaagent:/exporter/jmx_prometheus_javaagent.jar=7070:/exporter/flink-metrics.yml
+        metrics.latency.interval: 2000
+    volumes:
+      - ./data:/data
+      - ./jobs:/jobs
+      - ./exporter:/exporter
+    networks:
+      - flink-net
+
+  flink-taskmanager:
+    build: .
+    container_name: flink-taskmanager
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - |
+        FLINK_PROPERTIES=
+        env.java.opts.taskmanager: -javaagent:/exporter/jmx_prometheus_javaagent.jar=7070:/exporter/flink-metrics.yml
+        metrics.latency.interval: 2000
+    volumes:
+      - ./data:/data
+      - ./jobs:/jobs
+      - ./exporter:/exporter
+    networks:
+      - flink-net
+
+  # --- 2. MONITORING LAYER ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - flink-jobmanager
+    networks:
+      - flink-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+    networks:
+      - flink-net
+
+networks:
+  flink-net:
+    driver: bridge

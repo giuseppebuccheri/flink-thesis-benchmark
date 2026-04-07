@@ -1,0 +1,12 @@
+# Ignora i dati pesanti, ma mantieni la cartella
+data/*
+!data/.gitkeep
+
+# Ignora file di cache di Python e dell'IDE
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+
+# Eventuali file di log locali
+*.log
