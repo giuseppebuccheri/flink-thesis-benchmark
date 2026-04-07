@@ -43,14 +43,12 @@ To run the benchmark once and print the throughput to the terminal:
 docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py
 ```
 
-### Iterative Execution (Recommended for Statistical Validity)
-To avoid biases related to cold-starts or the host operating system (e.g., I/O cache saturation), it is highly recommended to run the job in a loop (5 iterations with a 5-second pause) and calculate the **median** of the results:
+###Running the Benchmarks
+The core benchmark script is written in PyFlink (/jobs/flink_benchmark.py) and tests three distinct scenarios: Low Selectivity Filter, High Selectivity Point Lookup, and Stateful Aggregation.
+
+Methodology Note (State vs. Data): Unlike database benchmarks that require thousands of looped queries to measure state retrieval latency, Flink is tested as a continuous stream processing engine. The script is executed once, ingesting and processing the entire 300,000-row dataset in a single pass to accurately measure sustained throughput (Op rate).
 ```bash
-for i in {1..5}; do \
-  echo "=== RUN $i ==="; \
-  docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py; \
-  sleep 5; \
-done
+docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py
 ```
 
 ## 📊 Collecting Metrics on Grafana
