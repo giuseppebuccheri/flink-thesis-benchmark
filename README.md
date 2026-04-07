@@ -10,8 +10,8 @@ The environment is entirely Docker-based and isolated within a dedicated network
 * **Grafana:** Provides real-time dashboard visualization for system performance profiling.
 
 ## 🚀 Prerequisites
-* Docker and Docker Compose installed on your host machine (e.g., Docker Desktop for Windows/Mac or Docker Engine for Linux).
-* **Dataset:** The CSV files required for the benchmark are not tracked in this Git repository due to size constraints.
+* **Docker & Docker Compose** installed on your host machine (e.g., Docker Desktop for Windows/Mac or Docker Engine for Linux).
+* **Dataset:** The CSV files required for the benchmark are not tracked in this Git repository due to size constraints. Place your CSV data in the `./data` directory.
 
 ## ⚙️ Setup & Quick Start
 
@@ -19,3 +19,55 @@ The environment is entirely Docker-based and isolated within a dedicated network
 ```bash
 git clone <your-repo-url>
 cd flink-thesis-benchmark
+```
+
+**2. Start the infrastructure**
+Since a custom `Dockerfile` is used to support PyFlink, the initial startup requires building the image:
+```bash
+docker compose up -d --build
+```
+
+**3. Access the Web Interfaces**
+Once the containers are in the **Up** state, you can access the following services:
+* **Grafana:** [http://localhost:3000](http://localhost:3000) (Credentials: `admin` / `admin`)
+* **Prometheus:** [http://localhost:9090](http://localhost:9090)
+* **Flink Web UI:** [http://localhost:8081](http://localhost:8081)
+
+## 🏃‍♂️ Running the Benchmarks
+
+The core benchmark script is written in PyFlink (`/jobs/flink_benchmark.py`) and tests three distinct scenarios: *Low Selectivity Filter*, *High Selectivity Point Lookup*, and *Stateful Aggregation*.
+
+### Single Execution
+To run the benchmark once and print the throughput to the terminal:
+```bash
+docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py
+```
+
+### Iterative Execution (Recommended for Statistical Validity)
+To avoid biases related to cold-starts or the host operating system (e.g., I/O cache saturation), it is highly recommended to run the job in a loop (5 iterations with a 5-second pause) and calculate the **median** of the results:
+```bash
+for i in {1..5}; do \
+  echo "=== RUN $i ==="; \
+  docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py; \
+  sleep 5; \
+done
+```
+
+## 📊 Collecting Metrics on Grafana
+While the script is running, monitor Grafana to extract the JVM Overhead times:
+* **Target Metric for GC Time:** `jvm_gc_collection_seconds_sum`
+* **Calculation Method:** Measure the delta (**Final Value - Initial Value**) of the "step" generated during the execution of a specific query on the `G1 Young Generation` line of the `flink-taskmanager`.
+
+## 🧹 Teardown
+
+To stop the infrastructure and remove the isolated network:
+```bash
+docker compose down
+```
+
+If you want to perform a deep clean by destroying the anonymous volumes as well:
+```bash
+docker compose down -v --remove-orphans
+```
+
+---
