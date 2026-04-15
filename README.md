@@ -45,6 +45,7 @@ The core benchmark script is written in PyFlink (`/jobs/flink_benchmark.py`) and
 * **Q2:** High Selectivity Point Lookup
 * **Q3:** Stateful Aggregation
 
+<<<<<<< HEAD
 > **⚠️ CRITICAL: Full Reset Between Runs**
 > Flink JVM Garbage Collector counters are cumulative. To prevent GC values from Q1 polluting Q2 and Q3, you **must** reset the cluster before every single run:
 > ```bash
@@ -81,6 +82,13 @@ This test measures the absolute maximum processing power of Flink (Maximum Op/Ra
 4. Submit the Flink Job (`flink run ...`). Since the startup mode is set to `earliest-offset`, Flink will devour the 300,000 records at maximum CPU capacity.
 5. **Measurement:** The execution time will drop to a few seconds, and the throughput will spike dramatically.
 
+=======
+Methodology Note (State vs. Data): Unlike database benchmarks that require thousands of looped queries to measure state retrieval latency, Flink is tested as a continuous stream processing engine. The script is executed once, ingesting and processing the entire 300,000-row dataset in a single pass to accurately measure sustained throughput (Op rate).
+```bash
+docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py
+```
+
+>>>>>>> 3cfde120dea7d6b5ecfe8813993c90a5bf2e69b4
 ## 📊 Collecting Metrics on Grafana
 
 Monitor the auto-provisioned Grafana dashboards to extract the required computational costs:
@@ -98,3 +106,9 @@ docker compose down
 To perform a deep clean (destroying all data and Kafka topics):
 ```bash
 docker compose down -v --remove-orphans
+<<<<<<< HEAD
+=======
+```
+
+---
+>>>>>>> 3cfde120dea7d6b5ecfe8813993c90a5bf2e69b4
