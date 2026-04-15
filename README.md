@@ -1,17 +1,23 @@
-# Apache Flink Benchmark & Monitoring Infrastructure
 
-This repository contains the containerized infrastructure and Python scripts used to test and monitor the performance of Apache Flink (Stream Processing). This project is part of a master's thesis focused on the comparative analysis of Big Data processing frameworks.
+# Apache Flink & Kafka Stream Processing Benchmark
+
+This repository contains the containerized infrastructure and Python scripts used to test and monitor the performance of Apache Flink in a pure **Stream Processing** environment. This project is part of a master's thesis focused on the comparative analysis of computational costs (Throughput and Garbage Collection overhead) across different Big Data processing architectures.
 
 ## 🏗️ System Architecture
-The environment is entirely Docker-based and isolated within a dedicated network (`flink-net`). It includes the following services:
-* **Apache Flink (v1.18+):** A cluster consisting of 1 JobManager and 1 TaskManager. The official Docker image was extended to include `python3` and the `apache-flink` library (PyFlink).
-* **JMX Prometheus Exporter:** A Java agent injected directly into the Flink JVM to export highly reliable metrics, including Garbage Collection overhead and Throughput.
-* **Prometheus:** Configured to scrape Flink metrics via port `7070`.
-* **Grafana:** Provides real-time dashboard visualization for system performance profiling.
+
+The environment is entirely Docker-based, isolated within a dedicated network (`flink-net`), and relies on the `Data in Motion` paradigm. It includes the following services:
+
+* **Apache Flink (v1.18.1):** A cluster consisting of 1 JobManager and 1 TaskManager. The official Docker image was extended to enforce Python 3.10 and the `apache-flink==1.18.1` library (PyFlink) to prevent dependency issues.
+* **Apache Kafka (KRaft Mode):** Message broker acting as the streaming source (topic: `sensor_events`). Runs without Zookeeper.
+* **Prometheus:** Configured to scrape Flink metrics via the Flink Native Prometheus Reporter on port `9249`. JMX is no longer used.
+* **Grafana:** Provides real-time dashboard visualization for system performance profiling (Dashboards are auto-provisioned).
+* **Kafka Data Generator (`kafka_generator.py`):** A host-machine Python script that acts as a true streaming producer (`acks=1`, `batch_size=1`, `linger_ms=0`).
 
 ## 🚀 Prerequisites
-* **Docker & Docker Compose** installed on your host machine (e.g., Docker Desktop for Windows/Mac or Docker Engine for Linux).
-* **Dataset:** The CSV files required for the benchmark are not tracked in this Git repository due to size constraints. Place your CSV data in the `./data` directory.
+
+* Docker & Docker Compose installed on your host machine.
+* Python 3 installed on your host machine with the `kafka-python` library (`pip install kafka-python`).
+* **Dataset:** The CSV files required for the benchmark are not tracked in this Git repository due to size constraints. Place your CSV data in the `./data/events_3parts` directory.
 
 ## ⚙️ Setup & Quick Start
 
@@ -22,41 +28,66 @@ cd flink-thesis-benchmark
 ```
 
 **2. Start the infrastructure**
-Since a custom `Dockerfile` is used to support PyFlink, the initial startup requires building the image:
+Since a custom Dockerfile is used to support PyFlink and specific connectors, the initial startup requires building the image:
 ```bash
 docker compose up -d --build
 ```
 
 **3. Access the Web Interfaces**
-Once the containers are in the **Up** state, you can access the following services:
-* **Grafana:** [http://localhost:3000](http://localhost:3000) (Credentials: `admin` / `admin`)
-* **Prometheus:** [http://localhost:9090](http://localhost:9090)
-* **Flink Web UI:** [http://localhost:8081](http://localhost:8081)
+* **Grafana:** `http://localhost:3000` (Credentials: admin / admin)
+* **Prometheus:** `http://localhost:9090`
+* **Flink Web UI:** `http://localhost:8081`
 
-## 🏃‍♂️ Running the Benchmarks
+## 🏃‍♂️ Benchmark Execution Protocols
 
-The core benchmark script is written in PyFlink (`/jobs/flink_benchmark.py`) and tests three distinct scenarios: *Low Selectivity Filter*, *High Selectivity Point Lookup*, and *Stateful Aggregation*.
+The core benchmark script is written in PyFlink (`/jobs/flink_benchmark.py`) and tests three distinct scenarios using Flink SQL:
+* **Q1:** Low Selectivity Filter
+* **Q2:** High Selectivity Point Lookup
+* **Q3:** Stateful Aggregation
 
-### Single Execution
-To run the benchmark once and print the throughput to the terminal:
-```bash
-docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py
-```
+> **⚠️ CRITICAL: Full Reset Between Runs**
+> Flink JVM Garbage Collector counters are cumulative. To prevent GC values from Q1 polluting Q2 and Q3, you **must** reset the cluster before every single run:
+> ```bash
+> docker compose restart flink-jobmanager flink-taskmanager
+> ```
 
-### Iterative Execution (Recommended for Statistical Validity)
-To avoid biases related to cold-starts or the host operating system (e.g., I/O cache saturation), it is highly recommended to run the job in a loop (5 iterations with a 5-second pause) and calculate the **median** of the results:
-```bash
-for i in {1..5}; do \
-  echo "=== RUN $i ==="; \
-  docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py; \
-  sleep 5; \
-done
-```
+To thoroughly evaluate the engine, this repository supports two different execution protocols:
+
+### Protocol A: Live Streaming (Steady-State Throughput)
+This test measures the engine's stability and GC overhead while keeping pace with a real-time data ingestion rate.
+
+1. Ensure the Kafka topic exists: `docker exec kafka kafka-topics --create --topic sensor_events --bootstrap-server localhost:9092`
+2. Uncomment the desired Query in `flink_benchmark.py` and save.
+3. Restart the Flink cluster and wait 15 seconds.
+4. Submit the Flink Job:
+   ```bash
+   docker exec -it flink-jobmanager flink run -py /jobs/flink_benchmark.py
+   ```
+5. Start the Kafka Producer to inject data:
+   ```bash
+   python3 scripts/kafka_generator.py
+   ```
+6. **Measurement:** Read the average throughput from Grafana during the "plateau" phase, and record the Total Execution Time from the python script's output.
+
+### Protocol B: Maximum Throughput (Stress Test / Backlog Processing)
+This test measures the absolute maximum processing power of Flink (Maximum Op/Rate) by forcing it to process a massive backlog of data without network ingestion bottlenecks.
+
+1. Restart the Flink cluster. Ensure **no jobs** are running.
+2. Fill the Kafka topic completely by running the generator *first*:
+   ```bash
+   python3 scripts/kafka_generator.py
+   ```
+3. Wait for the script to finish (100% of data is now *at rest* in Kafka).
+4. Submit the Flink Job (`flink run ...`). Since the startup mode is set to `earliest-offset`, Flink will devour the 300,000 records at maximum CPU capacity.
+5. **Measurement:** The execution time will drop to a few seconds, and the throughput will spike dramatically.
 
 ## 📊 Collecting Metrics on Grafana
-While the script is running, monitor Grafana to extract the JVM Overhead times:
-* **Target Metric for GC Time:** `jvm_gc_collection_seconds_sum`
-* **Calculation Method:** Measure the delta (**Final Value - Initial Value**) of the "step" generated during the execution of a specific query on the `G1 Young Generation` line of the `flink-taskmanager`.
+
+Monitor the auto-provisioned Grafana dashboards to extract the required computational costs:
+
+* **Throughput (rec/s):** Evaluated using `sum(rate(flink_taskmanager_job_task_operator_numRecordsOut[1m]))`. Look at the peak or the steady-state mean depending on the protocol used.
+* **Total Exec Time:** Use the generator script output for Protocol A, or measure the base of the throughput spike for Protocol B.
+* **GC Total Time:** Calculate the delta (Final Value - Initial Value) from the Stat panel running `sum(flink_taskmanager_Status_JVM_GarbageCollector_G1_Young_Generation_Time)`.
 
 ## 🧹 Teardown
 
@@ -64,10 +95,6 @@ To stop the infrastructure and remove the isolated network:
 ```bash
 docker compose down
 ```
-
-If you want to perform a deep clean by destroying the anonymous volumes as well:
+To perform a deep clean (destroying all data and Kafka topics):
 ```bash
 docker compose down -v --remove-orphans
-```
-
----

@@ -1,9 +1,2 @@
 lowercaseOutputName: true
 lowercaseOutputLabelNames: true
-whitelistObjectNames:
-  - "org.apache.flink:*"
-  - "java.lang:*"
-rules:
-  - pattern: "^org.apache.flink<type=(.*), name=(.*)><>(sample|value|count|mean|max|min|p50|p75|p95|p99): (.*)"
-    name: flink_$1_$2_$3
-  - pattern: ".*"

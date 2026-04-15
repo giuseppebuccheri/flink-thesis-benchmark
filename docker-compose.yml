@@ -1,23 +1,22 @@
 services:
-  # --- 1. APACHE FLINK ---
 # --- 1. APACHE FLINK ---
   flink-jobmanager:
     build: .
     container_name: flink-jobmanager
     command: jobmanager
     ports:
-      - "8081:8081" 
-      - "7070:7070" 
+      - "8081:8081"
+      - "9249:9249"   # Prometheus scrape - JobManager
     environment:
-      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
       - |
         FLINK_PROPERTIES=
-        env.java.opts.jobmanager: -javaagent:/exporter/jmx_prometheus_javaagent.jar=7070:/exporter/flink-metrics.yml
-        metrics.latency.interval: 2000
+        jobmanager.rpc.address: flink-jobmanager
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+        taskmanager.numberOfTaskSlots: 4
     volumes:
       - ./data:/data
       - ./jobs:/jobs
-      - ./exporter:/exporter
     networks:
       - flink-net
 
@@ -27,16 +26,18 @@ services:
     command: taskmanager
     depends_on:
       - flink-jobmanager
+    ports:
+      - "9250:9249"
     environment:
-      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
       - |
         FLINK_PROPERTIES=
-        env.java.opts.taskmanager: -javaagent:/exporter/jmx_prometheus_javaagent.jar=7070:/exporter/flink-metrics.yml
-        metrics.latency.interval: 2000
+        jobmanager.rpc.address: flink-jobmanager
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+        taskmanager.numberOfTaskSlots: 4
     volumes:
       - ./data:/data
       - ./jobs:/jobs
-      - ./exporter:/exporter
     networks:
       - flink-net
 
@@ -50,6 +51,7 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     depends_on:
       - flink-jobmanager
+      - flink-taskmanager
     networks:
       - flink-net
 
@@ -62,6 +64,28 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     depends_on:
       - prometheus
+    networks:
+      - flink-net
+
+# --- 3. KAFKA MESSAGE BROKER (KRAFT MODE) ---
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_NUM_PARTITIONS: 4
     networks:
       - flink-net
 

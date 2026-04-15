@@ -1,13 +1,10 @@
-global:
-  scrape_interval: 15s
-
 scrape_configs:
-  - job_name: 'prometheus'
+  - job_name: 'flink-jobmanager'
+    scrape_interval: 5s
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['flink-jobmanager:9249']
 
-  - job_name: 'flink-cluster'
+  - job_name: 'flink-taskmanager'
+    scrape_interval: 5s
     static_configs:
-      - targets: 
-        - 'flink-jobmanager:7070'
-        - 'flink-taskmanager:7070'
+      - targets: ['flink-taskmanager:9249']
