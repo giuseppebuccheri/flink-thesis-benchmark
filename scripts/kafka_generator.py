@@ -12,16 +12,16 @@ BOOTSTRAP_SERVERS = ['localhost:9092']
 TOPIC_NAME        = 'sensor_events'
 CSV_DIR           = './data/events_3parts'
 
-# TRUE STREAMING PRODUCER:
-# - linger_ms=0  → nessun accumulo, ogni send() parte immediatamente
-# - batch_size=1 → disabilita il batching lato producer
-# - acks=1       → leader ack, bilanciamento tra correttezza e velocità
-# - NO compression → il profilo CPU che misuriamo è quello di Flink, non del producer
+# TRUE STREAMING PRODUCER (REAL-WORLD CONFIG):
+# - linger_ms=10   → aspetta fino a 10ms prima di inviare, per raggruppare i messaggi
+# - batch_size     → raggruppa fino a 64KB di dati per scatolone
+# - compression    → usa lz4 (standard industriale) per ridurre la banda
 producer = KafkaProducer(
     bootstrap_servers=BOOTSTRAP_SERVERS,
     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-    linger_ms=0,
-    batch_size=1,
+    linger_ms=10,             
+    batch_size=65536,         
+    compression_type='lz4',   
     acks=1
 )
 
