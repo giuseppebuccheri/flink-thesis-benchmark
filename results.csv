@@ -1,0 +1,10 @@
+Matrice,Query_ID,Throughput_cc,GC_Time_ms,Events,Users,Selectivity,Correlation
+Matrice_A_Selectivity,1,20100.41,119.0,1000000,10000,0.01,0.0
+Matrice_A_Selectivity,1,20345.59,146.0,1000000,10000,0.50,0.0
+Matrice_A_Selectivity,1,21647.99,146.0,1000000,10000,0.99,0.0
+Matrice_B_Cardinality,3,21647.99,96.0,500000,100,0.05,0.0
+Matrice_B_Cardinality,3,20325.53,115.0,500000,10000,0.05,0.0
+Matrice_B_Cardinality,3,19967.02,197.0,500000,100000,0.05,0.0
+Matrice_C_JoinCorrelation,4,19967.02,457.0,300000,100000,0.05,0.10
+Matrice_C_JoinCorrelation,4,18484.65,636.0,300000,100000,0.05,0.50
+Matrice_C_JoinCorrelation,4,15401.31,806.0,300000,100000,0.05,1.00
