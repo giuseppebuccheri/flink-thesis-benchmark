@@ -6,7 +6,7 @@ services:
     command: jobmanager
     ports:
       - "8081:8081"
-      - "9249:9249"   # Prometheus scrape - JobManager
+      - "9249:9249"
     environment:
       - |
         FLINK_PROPERTIES=
@@ -14,8 +14,8 @@ services:
         metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
         metrics.reporter.prom.port: 9249
         taskmanager.numberOfTaskSlots: 4
+        jobmanager.memory.process.size: 800m
     volumes:
-      - ./data:/data
       - ./jobs:/jobs
     networks:
       - flink-net
@@ -35,11 +35,45 @@ services:
         metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
         metrics.reporter.prom.port: 9249
         taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size:2560m
     volumes:
-      - ./data:/data
       - ./jobs:/jobs
     networks:
       - flink-net
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra-state
+    ports:
+      - "9042:9042"
+    environment:
+      - CASSANDRA_CLUSTER_NAME=BenchmarkCluster
+      - JVM_OPTS=-Xms512M -Xmx512M
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - flink-net
+
+  postgres-state:
+    image: postgres:15
+    container_name: postgres-state
+    environment:
+      POSTGRES_USER: flinkuser
+      POSTGRES_PASSWORD: flinkpassword
+      POSTGRES_DB: benchmark_db
+    ports:
+      - "5432:5432"
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flinkuser -d benchmark_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # --- 2. MONITORING LAYER ---
   prometheus:

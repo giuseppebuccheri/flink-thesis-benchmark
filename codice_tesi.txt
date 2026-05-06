@@ -1,0 +1,816 @@
+
+
+========================================
+FILE: ./docker-compose.yml
+========================================
+
+services:
+# --- 1. APACHE FLINK ---
+  flink-jobmanager:
+    build: .
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"
+      - "9249:9249"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+        taskmanager.numberOfTaskSlots: 4
+        jobmanager.memory.process.size: 800m
+    volumes:
+      - ./jobs:/jobs
+    networks:
+      - flink-net
+
+  flink-taskmanager:
+    build: .
+    container_name: flink-taskmanager
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    ports:
+      - "9250:9249"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 1024m
+    volumes:
+      - ./jobs:/jobs
+    networks:
+      - flink-net
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra-state
+    ports:
+      - "9042:9042"
+    environment:
+      - CASSANDRA_CLUSTER_NAME=BenchmarkCluster
+      - JVM_OPTS=-Xms512M -Xmx512M
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - flink-net
+
+  postgres-state:
+    image: postgres:15
+    container_name: postgres-state
+    environment:
+      POSTGRES_USER: flinkuser
+      POSTGRES_PASSWORD: flinkpassword
+      POSTGRES_DB: benchmark_db
+    ports:
+      - "5432:5432"
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flinkuser -d benchmark_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- 2. MONITORING LAYER ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - flink-jobmanager
+      - flink-taskmanager
+    networks:
+      - flink-net
+
+# --- 3. GRAFANA DASHBOARD ---
+#  grafana:
+#    image: grafana/grafana:latest
+#    container_name: grafana
+#    ports:
+#      - "3000:3000"
+#    environment:
+#      - GF_SECURITY_ADMIN_PASSWORD=admin
+#    depends_on:
+#      - prometheus
+#    networks:
+#      - flink-net
+
+# --- 3. KAFKA MESSAGE BROKER (KRAFT MODE) ---
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_NUM_PARTITIONS: 4
+    networks:
+      - flink-net
+
+networks:
+  flink-net:
+    driver: bridge
+
+========================================
+FILE: ./jobs/actions_benchmark.py
+========================================
+
+import sys
+from pyflink.table import EnvironmentSettings, TableEnvironment
+
+# ============================================================================
+# TABLES DEFINITIONS
+# ============================================================================
+
+def create_kafka_source(t_env):
+    t_env.execute_sql("""
+        CREATE TABLE events (
+            user_id BIGINT,
+            event_id BIGINT,
+            ts STRING,
+            event_type STRING,
+            amount DOUBLE,
+            proctime AS PROCTIME() -- Necessario per la Lookup Join
+        ) WITH (
+            'connector' = 'kafka',
+            'topic' = 'sensor_events',
+            'properties.bootstrap.servers' = 'kafka:29092',
+            'properties.group.id' = 'benchmark-group',
+            'scan.startup.mode' = 'earliest-offset',
+            'format' = 'json'
+        )
+    """)
+
+def create_kafka_source_purchases(t_env):
+    t_env.execute_sql("""
+        CREATE TABLE purchases (
+            user_id BIGINT,
+            related_event_id BIGINT,
+            purchase_id STRING,
+            status STRING,
+            proctime AS PROCTIME() -- AGGIUNTO PER LA INTERVAL JOIN
+        ) WITH (
+            'connector' = 'kafka',
+            'topic' = 'purchases',
+            'properties.bootstrap.servers' = 'kafka:29092',
+            'properties.group.id' = 'benchmark-purchases-group',
+            'scan.startup.mode' = 'earliest-offset',
+            'format' = 'json'
+        )
+    """)
+
+def create_postgres_lookup_source(t_env):
+    """Tabella di lookup su Postgres per il test STATE_TO_DATA"""
+    t_env.execute_sql("""
+        CREATE TABLE user_registry (
+            user_id BIGINT,
+            discount_rate DOUBLE,
+            tier STRING,
+            PRIMARY KEY (user_id) NOT ENFORCED
+        ) WITH (
+            'connector' = 'jdbc',
+            'url' = 'jdbc:postgresql://postgres-state:5432/benchmark_db',
+            'table-name' = 'registry',
+            'username' = 'flinkuser',
+            'password' = 'flinkpassword',
+            'lookup.cache.max-rows' = '10000',
+            'lookup.cache.ttl' = '10 min'
+        )
+    """)
+
+def create_kafka_sink(t_env, topic_name, schema):
+    """Per stream Append-Only (Filter, Join, Enrichment)"""
+    t_env.execute_sql(f"""
+        CREATE TABLE kafka_sink (
+            {schema}
+        ) WITH (
+            'connector' = 'kafka',
+            'topic' = '{topic_name}',
+            'properties.bootstrap.servers' = 'kafka:29092',
+            'format' = 'json'
+        )
+    """)
+
+def create_upsert_kafka_sink(t_env, topic_name, schema):
+    """Per stream con Aggiornamenti (Aggregate). Richiede una PRIMARY KEY."""
+    t_env.execute_sql(f"""
+        CREATE TABLE kafka_sink (
+            {schema},
+            PRIMARY KEY (user_id) NOT ENFORCED
+        ) WITH (
+            'connector' = 'upsert-kafka',
+            'topic' = '{topic_name}',
+            'properties.bootstrap.servers' = 'kafka:29092',
+            'key.format' = 'json',
+            'value.format' = 'json'
+        )
+    """)
+
+def create_state_sink(t_env):
+    """Sink per il test Aggregate su Postgres"""
+    t_env.execute_sql("""
+        CREATE TABLE database_sink (
+            user_id BIGINT,
+            n_events BIGINT,
+            PRIMARY KEY (user_id) NOT ENFORCED
+        ) WITH (
+            'connector' = 'jdbc',
+            'url' = 'jdbc:postgresql://postgres-state:5432/benchmark_db',
+            'table-name' = 'user_metrics',
+            'username' = 'flinkuser',
+            'password' = 'flinkpassword'
+        )
+    """)
+
+# ============================================================================
+# ACTION IMPLEMENTATIONS
+# ============================================================================
+
+def run_filter(t_env, io_mode):
+    """Filter (Stateless) - Solo Data-to-Data"""
+    create_kafka_source(t_env)
+    create_kafka_sink(t_env, 'sink_filter', 'user_id BIGINT, event_id BIGINT, amount DOUBLE')
+    
+    return "INSERT INTO kafka_sink SELECT user_id, event_id, amount FROM events WHERE amount > 10.0"
+
+def run_aggregate(t_env, io_mode):
+    """Aggregate (Stateful) - Data-to-Data vs Data-to-State"""
+    create_kafka_source(t_env)
+    
+    if io_mode == 'data_to_data':
+        create_upsert_kafka_sink(t_env, 'sink_aggregate', 'user_id BIGINT, n_events BIGINT')
+        return "INSERT INTO kafka_sink SELECT user_id, COUNT(*) AS n_events FROM events GROUP BY user_id"
+        
+    elif io_mode == 'data_to_state':
+        create_state_sink(t_env)
+        return "INSERT INTO database_sink SELECT user_id, COUNT(*) AS n_events FROM events GROUP BY user_id"
+
+def run_join_stream(t_env, io_mode):
+    """Stream-to-Stream Join (Heavy Stateful) - Solo Data-to-Data"""
+    create_kafka_source(t_env)
+    create_kafka_source_purchases(t_env)
+    create_kafka_sink(t_env, 'sink_join', 'user_id BIGINT, amount DOUBLE, purchase_id STRING')
+    
+    return """
+        INSERT INTO kafka_sink 
+        SELECT e.user_id, e.amount, p.purchase_id 
+        FROM events e
+        INNER JOIN purchases p 
+        ON e.event_id = p.related_event_id
+        AND e.proctime BETWEEN p.proctime - INTERVAL '5' MINUTE AND p.proctime + INTERVAL '5' MINUTE
+    """
+
+def run_enrichment(t_env, io_mode):
+    """Lookup Join (State-to-Data) - Arricchimento dello stream interrogando DB"""
+    create_kafka_source(t_env)
+    create_postgres_lookup_source(t_env)
+    create_kafka_sink(t_env, 'sink_enrichment', 'user_id BIGINT, amount DOUBLE, tier STRING, discount_rate DOUBLE')
+    
+    return """
+        INSERT INTO kafka_sink 
+        SELECT e.user_id, e.amount, r.tier, r.discount_rate
+        FROM events AS e
+        JOIN user_registry FOR SYSTEM_TIME AS OF e.proctime AS r
+        ON e.user_id = r.user_id
+    """
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3:
+        print("\nErrore: Specifica azione e modalità I/O")
+        sys.exit(1)
+    
+    action = sys.argv[1].lower()
+    io_mode = sys.argv[2].lower()
+    
+    env_settings = EnvironmentSettings.in_streaming_mode()
+    t_env = TableEnvironment.create(env_settings)
+    t_env.get_config().set("pipeline.jars", "file:///opt/flink/lib/flink-sql-connector-kafka-3.1.0-1.18.jar")
+    
+    action_map = {
+        'filter': run_filter,
+        'aggregate': run_aggregate,
+        'join_stream': run_join_stream,
+        'enrichment': run_enrichment
+    }
+    
+    if action not in action_map:
+        print(f"Azione '{action}' non riconosciuta")
+        sys.exit(1)
+        
+    query = action_map[action](t_env, io_mode)
+    job = t_env.execute_sql(query)
+    print(f"Job submitted, ID: {job.get_job_client().get_job_id()}")
+
+========================================
+FILE: ./exporter/flink-metrics.yml
+========================================
+
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+========================================
+FILE: ./run_experiment.sh
+========================================
+
+#!/bin/bash
+
+if [ "$#" -lt 2 ]; then
+    echo "Usage: $0 <action> <io_mode> [events] [users] [extra_param]"
+    exit 1
+fi
+
+ACTION=$1
+IO_MODE=$2
+EVENTS=${3:-500000}
+USERS=${4:-10000}
+PARAM=${5:-0.05}
+
+# Configurazioni globali
+KAFKA_BROKER="localhost:9092"
+TOPICS=("sensor_events" "purchases" "sink_filter" "sink_aggregate" "sink_join" "sink_enrichment")
+
+log() {
+    echo "[*] $1"
+}
+
+init_infrastructure() {
+    log "Checking Docker infrastructure..."
+    if ! docker compose ps | grep -q "kafka"; then
+        log "Starting Docker Compose (waiting 45s)..."
+        docker compose up -d
+        sleep 45
+    fi
+}
+
+setup_databases() {
+    log "Waiting for databases to be ready..."
+    sleep 5 # Piccolo buffer
+
+    log "Setting up Postgres schema..."
+    # Creiamo la tabella per l'Aggregate in Postgres e la svuotiamo se esiste già
+    docker exec postgres-state psql -U flinkuser -d benchmark_db -c "
+        CREATE TABLE IF NOT EXISTS user_metrics (user_id BIGINT PRIMARY KEY, n_events BIGINT);
+        TRUNCATE TABLE user_metrics;
+    " >/dev/null 2>&1
+    
+    # Mantengo anche lo schema di Cassandra se vuoi tenerlo acceso
+    docker exec cassandra-state cqlsh -e "
+        CREATE KEYSPACE IF NOT EXISTS benchmark_ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+        USE benchmark_ks;
+        CREATE TABLE IF NOT EXISTS user_metrics (user_id bigint PRIMARY KEY, n_events bigint);
+        CREATE TABLE IF NOT EXISTS registry (user_id bigint PRIMARY KEY, discount_rate double, tier text);
+    " >/dev/null 2>&1 || true
+}
+
+cleanup_state() {
+    log "Cleaning Kafka consumer groups and topics..."
+    docker exec kafka kafka-consumer-groups --bootstrap-server $KAFKA_BROKER --delete --group benchmark-group >/dev/null 2>&1 || true
+    
+    for topic in "${TOPICS[@]}"; do
+        docker exec kafka kafka-topics --bootstrap-server $KAFKA_BROKER --delete --topic $topic --if-exists >/dev/null 2>&1
+    done
+    sleep 5
+    
+    for topic in "${TOPICS[@]}"; do
+        docker exec kafka kafka-topics --bootstrap-server $KAFKA_BROKER --create --topic $topic --partitions 4 --if-not-exists >/dev/null 2>&1
+    done
+    sleep 3
+}
+
+reset_flink_prometheus() {
+    log "Restarting Flink and Prometheus (waiting 25s)..."
+    docker compose restart flink-jobmanager flink-taskmanager prometheus >/dev/null 2>&1
+    sleep 25
+}
+
+prepare_data() {
+    if [[ "$ACTION" == "enrichment" ]]; then
+        log "Populating Postgres (State) with $USERS users..."
+        python3 scripts/state_populator.py --users $USERS
+    fi
+
+    log "Populating Kafka (Data) with $EVENTS events..."
+    python3 scripts/kafka_generator.py --events $EVENTS --users $USERS --selectivity $PARAM --join-rate $PARAM
+    sleep 5
+}
+
+submit_flink_job() {
+    log "Submitting Flink job..."
+    docker exec -d flink-jobmanager flink run -py /jobs/actions_benchmark.py $ACTION $IO_MODE
+
+    log "Waiting for job to reach RUNNING state..."
+    for _ in {1..60}; do
+        STATUS=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | python3 -c \
+            "import sys,json; jobs=json.load(sys.stdin).get('jobs',[]); print(jobs[0]['state'] if jobs else 'NONE')" 2>/dev/null || echo "NONE")
+        
+        if [ "$STATUS" = "RUNNING" ]; then
+            log "Job RUNNING. Waiting 10s for warm-up..."
+            sleep 10
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+wait_for_processing() {
+    log "Processing... sleeping for 60s."
+    sleep 60
+}
+
+extract_metrics() {
+    log "Extracting metrics from Prometheus..."
+    python3 scripts/extract_metrics.py $ACTION $IO_MODE
+}
+
+cancel_flink_job() {
+    log "Cancelling Flink job..."
+    JOB_ID=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | python3 -c \
+        "import sys,json; jobs=json.load(sys.stdin).get('jobs',[]); print(jobs[0]['jid'] if jobs else '')" 2>/dev/null || echo "")
+    
+    if [ -n "$JOB_ID" ]; then
+        curl -s -X PATCH "http://localhost:8081/jobs/${JOB_ID}?mode=cancel" >/dev/null
+    fi
+    sleep 5
+}
+
+main() {
+    echo "--- STARTING BENCHMARK: $ACTION | $IO_MODE ---"
+    init_infrastructure
+    setup_databases
+    cleanup_state
+    reset_flink_prometheus
+    prepare_data
+    submit_flink_job
+    wait_for_processing
+    extract_metrics
+    cancel_flink_job
+    echo "--- RUN COMPLETED ---"
+}
+
+main
+
+========================================
+FILE: ./scripts/plot_results.py
+========================================
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+def load_and_clean_data(filename):
+    # Carichiamo il CSV
+    df = pd.read_csv(filename)
+    
+    # Il trucco magico: raggruppiamo le 3 run e prendiamo la MEDIANA. 
+    # Questo elimina i crolli anomali causati dai lag di Docker!
+    df_agg = df.groupby(['Matrice', 'Selectivity', 'Users', 'Correlation']).median(numeric_only=True).reset_index()
+    
+    return df_agg
+
+def plot_metrics(df):
+    # Stile professionale per la tesi
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle('Apache Flink Stream Processing Profiling - Parametric Cost Functions', fontsize=16, fontweight='bold', y=1.05)
+
+    # --- MATRICE A: SELECTIVITY (Stateless) ---
+    df_a = df[df['Matrice'].str.contains('Matrice_A', na=False)].sort_values('Selectivity')
+    ax1 = axes[0]
+    ax1_gc = ax1.twinx() # Secondo asse Y per il GC Time
+    
+    ax1.plot(df_a['Selectivity'] * 100, df_a['Throughput_cc'], 'b-o', linewidth=2, label='Throughput (cc)')
+    ax1_gc.plot(df_a['Selectivity'] * 100, df_a['GC_Time_ms'], 'r--s', linewidth=2, label='GC Time (ms)')
+    
+    ax1.set_title('Matrix A: Filter Selectivity (Stateless)', fontsize=12)
+    ax1.set_xlabel('Selectivity (%)')
+    ax1.set_ylabel('Throughput (records/sec)', color='b')
+    ax1_gc.set_ylabel('GC Time (ms)', color='r')
+    ax1.set_ylim(0, max(df_a['Throughput_cc']) * 1.2)
+    # Limite basso per evidenziare che il GC è irrilevante
+    ax1_gc.set_ylim(0, max(df_a['GC_Time_ms']) * 1.5) 
+
+    # --- MATRICE B: CARDINALITY (Stateful) ---
+    df_b = df[df['Matrice'].str.contains('Matrice_B', na=False)].sort_values('Users')
+    ax2 = axes[1]
+    ax2_gc = ax2.twinx()
+    
+    # Asse X logaritmico (10^2, 10^4, 10^5)
+    ax2.plot(np.log10(df_b['Users']), df_b['Throughput_cc'], 'b-o', linewidth=2)
+    ax2_gc.plot(np.log10(df_b['Users']), df_b['GC_Time_ms'], 'r--s', linewidth=2)
+    
+    ax2.set_title('Matrix B: State Cardinality (Stateful)', fontsize=12)
+    ax2.set_xlabel('Unique Users (Log10)')
+    ax2.set_ylabel('Throughput (records/sec)', color='b')
+    ax2_gc.set_ylabel('GC Time (ms)', color='r')
+    ax2.set_ylim(0, max(df_b['Throughput_cc']) * 1.2)
+    ax2_gc.set_ylim(0, max(df_b['GC_Time_ms']) * 1.2)
+
+    # --- MATRICE C: JOIN CORRELATION (Heavy Stateful) ---
+    df_c = df[df['Matrice'].str.contains('Matrice_C', na=False)].sort_values('Correlation')
+    ax3 = axes[2]
+    ax3_gc = ax3.twinx()
+    
+    ax3.plot(df_c['Correlation'] * 100, df_c['Throughput_cc'], 'b-o', linewidth=2)
+    ax3_gc.plot(df_c['Correlation'] * 100, df_c['GC_Time_ms'], 'r--s', linewidth=2)
+    
+    ax3.set_title('Matrix C: Join Correlation (Heavy Stateful)', fontsize=12)
+    ax3.set_xlabel('Join Correlation Rate (%)')
+    ax3.set_ylabel('Throughput (records/sec)', color='b')
+    ax3_gc.set_ylabel('GC Time (ms)', color='r')
+    ax3.set_ylim(0, max(df_c['Throughput_cc']) * 1.2)
+    ax3_gc.set_ylim(0, max(df_c['GC_Time_ms']) * 1.2)
+
+    # Legenda globale in alto
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax1_gc.get_legend_handles_labels()
+    fig.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper center', bbox_to_anchor=(0.5, 0.95), ncol=2)
+
+    # Salvataggio e render
+    plt.tight_layout()
+    plt.savefig('tesi_grafici_flink.png', dpi=300, bbox_inches='tight')
+    print("✅ Grafici puliti generati con successo! Controlla il file 'tesi_grafici_flink.png'")
+
+if __name__ == '__main__':
+    # Esegui il parsing e disegna i grafici
+    df = load_and_clean_data('results.csv')
+    plot_metrics(df)
+
+========================================
+FILE: ./scripts/kafka_generator.py
+========================================
+
+import json
+import time
+import argparse
+import random
+from kafka import KafkaProducer
+from kafka.admin import KafkaAdminClient, NewTopic
+import uuid
+
+# CONFIGURAZIONE
+BOOTSTRAP_SERVERS = ['localhost:9092']
+TOPIC_EVENTS      = 'sensor_events'
+TOPIC_PURCHASES   = 'purchases'
+
+def setup_topics(admin_client, topics):
+    """Assicura che i topic esistano prima di iniziare a produrre"""
+    existing_topics = admin_client.list_topics()
+    topics_to_create = []
+    for topic in topics:
+        if topic not in existing_topics:
+            topics_to_create.append(NewTopic(name=topic, num_partitions=4, replication_factor=1))
+    
+    if topics_to_create:
+        try:
+            admin_client.create_topics(new_topics=topics_to_create, validate_only=False)
+            print(f"✅ Topic creati: {[t.name for t in topics_to_create]}")
+        except Exception as e:
+            print(f"⚠️ Errore creazione topic: {e}")
+
+
+# argparse per i parametri dinamici
+parser = argparse.ArgumentParser(description="Generatore Parametrico Kafka per Flink (Dual-Topic)")
+parser.add_argument('--events', type=int, default=300000, help='Volume totale di eventi (su topic 1)')
+parser.add_argument('--users', type=int, default=1000, help='Cardinalità: Numero di user_id unici')
+parser.add_argument('--target-user', type=int, default=12345, help='Target user_id per le query di Filter')
+parser.add_argument('--selectivity', type=float, default=0.01, help='Percentuale (0.0 a 1.0) di eventi con target_user')
+parser.add_argument('--join-rate', type=float, default=0.0, help='Percentuale di eventi che genera un "acquisto" correlato sul topic 2')
+args = parser.parse_args()
+
+# Inizializza Admin Client per creare i topic se necessario
+admin_client = KafkaAdminClient(bootstrap_servers=BOOTSTRAP_SERVERS)
+setup_topics(admin_client, [TOPIC_EVENTS, TOPIC_PURCHASES])
+admin_client.close()
+
+# Inizializza Kafka Producer con configurazione ottimizzata per l'alta velocità
+producer = KafkaProducer(
+    bootstrap_servers=BOOTSTRAP_SERVERS,
+    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+    linger_ms=10,             
+    batch_size=65536,         
+    compression_type='lz4',   
+    acks=1
+)
+
+print(f"============================================================")
+print(f"[STREAMING MODE] Generazione Dinamica Eventi in corso...")
+print(f"Volume Totale      : {args.events:,} eventi (Topic: {TOPIC_EVENTS})")
+print(f"Cardinalità Utenti : {args.users:,} utenti unici")
+print(f"Selectivity Filter : {args.selectivity * 100:.1f}% per user_id {args.target_user}")
+if args.join_rate > 0:
+    print(f"Join Correlation   : {args.join_rate * 100:.1f}% (Topic: {TOPIC_PURCHASES})")
+print(f"============================================================\n")
+
+start_time = time.time()
+events_sent = 0
+purchases_sent = 0
+
+for i in range(args.events):
+    # 1. Logica Selectivity
+    if random.random() < args.selectivity:
+        uid = args.target_user
+    else:
+        uid = random.randint(1, args.users)
+        if uid == args.target_user:
+            uid += 1
+    
+    # 2. Generazione Evento Principale
+    event_id = i
+    event = {
+        "user_id": uid,
+        "event_id": event_id,
+        "ts": "2026-01-01 10:00:00",
+        "event_type": random.choice(["click", "view", "share"]),
+        "amount": round(random.uniform(1.0, 50.0), 2)
+    }
+    producer.send(TOPIC_EVENTS, event)
+    events_sent += 1
+
+    # 3. Logica Join / Correlazione
+    if args.join_rate > 0 and random.random() < args.join_rate:
+        purchase = {
+            "user_id": uid, # Chiave di Join
+            "related_event_id": event_id,
+            "purchase_id": str(uuid.uuid4()), # Questo non va ancora a Flink, può restare UUID
+            "status": "completed"
+        }
+        producer.send(TOPIC_PURCHASES, purchase)
+        purchases_sent += 1
+
+    # Logging
+    if (i + 1) % 100_000 == 0:
+        elapsed = time.time() - start_time
+        rate = (events_sent + purchases_sent) / elapsed
+        print(f"  {events_sent:,} eventi base | {purchases_sent:,} acquisti correlati | avg rate: {rate:,.0f} msg/s")
+
+producer.flush()
+elapsed = time.time() - start_time
+total_sent = events_sent + purchases_sent
+print(f"\n✅ Fine: {total_sent:,} messaggi totali in {elapsed:.2f}s ({total_sent / elapsed:,.0f} msg/s avg)")
+
+========================================
+FILE: ./scripts/extract_metrics.py
+========================================
+
+import requests
+import sys
+import csv
+import os
+
+# --- CONFIGURAZIONE PROMETHEUS ---
+PROMETHEUS_URL = "http://localhost:9090/api/v1/query"
+
+def query_prometheus(promql_query):
+    """Funzione per eseguire query PromQL e restituire il risultato come float."""
+    try:
+        response = requests.get(PROMETHEUS_URL, params={'query': promql_query})
+        response.raise_for_status()
+        data = response.json()
+        
+        if data['status'] == 'success' and data['data']['result']:
+            return float(data['data']['result'][0]['value'][1])
+        return 0.0
+    except Exception as e:
+        print(f"⚠️ Errore API Prometheus: {e}")
+        return 0.0
+
+def collect_benchmark_results(action, io_mode):
+    print("--- RACCOLTA METRICHE AUTOMATIZZATA ---")
+    
+    # 1. Throughput CC (In)
+    throughput_query = '''max_over_time(
+        sum(rate(flink_taskmanager_job_task_operator_numRecordsOut{operator_name=~"(?i).*Source.*"}[15s]))
+        [3m:5s]
+    )'''
+    
+    # 2. Sink Throughput Reale (Out)
+    sink_records_query = '''max_over_time(
+        sum(rate(flink_taskmanager_job_task_operator_numRecordsIn{operator_name=~"(?i).*Sink.*"}[15s]))
+        [3m:5s]
+    )'''
+    
+    # 3. GC Time
+    gc_query = '''sum(increase(flink_taskmanager_Status_JVM_GarbageCollector_G1_Young_Generation_Time[2m]))
+                + sum(increase(flink_taskmanager_Status_JVM_GarbageCollector_G1_Old_Generation_Time[2m]))'''    
+    
+    throughput = query_prometheus(throughput_query)
+    sink_throughput = query_prometheus(sink_records_query)
+    gc_time = query_prometheus(gc_query)
+    
+    if gc_time < 0:
+        gc_time = 0.0
+
+    print(f"Action: {action.upper()} | Mode: {io_mode.upper()}")
+    print(f"In Throughput: {throughput:,.2f} r/s | Out Throughput: {sink_throughput:,.2f} r/s | GC Time: {gc_time:,.0f} ms")
+    
+    csv_filename = "results_io_benchmark.csv"
+    file_exists = os.path.isfile(csv_filename)
+    
+    with open(csv_filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            # Rimosso Latency_p99 dall'header
+            writer.writerow(["Action", "IO_Mode", "Throughput_cc", "GC_Time_ms", "Sink_Throughput"])
+        
+        # Rimosso latency_p99 dai dati salvati
+        writer.writerow([action, io_mode, round(throughput, 2), round(gc_time, 0), round(sink_throughput, 2)])
+
+if __name__ == '__main__':
+    # Prende Action e IO_Mode da linea di comando (passati dal bash script)
+    action_arg = sys.argv[1] if len(sys.argv) > 1 else "unknown_action"
+    io_mode_arg = sys.argv[2] if len(sys.argv) > 2 else "unknown_mode"
+    
+    collect_benchmark_results(action_arg, io_mode_arg)
+
+========================================
+FILE: ./scripts/state_populator.py
+========================================
+
+import psycopg2
+import argparse
+import random
+import time
+
+def populate_postgres(users_count):
+    print(f"🔄 Connessione a Postgres... (Target: {users_count} utenti)")
+    # Si connette a localhost mappato da Docker
+    conn = psycopg2.connect(
+        host="localhost", database="benchmark_db", user="flinkuser", password="flinkpassword"
+    )
+    cur = conn.cursor()
+    
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS registry (
+            user_id BIGINT PRIMARY KEY,
+            discount_rate DOUBLE PRECISION,
+            tier VARCHAR(50)
+        )
+    """)
+    cur.execute("TRUNCATE TABLE registry;")
+    
+    tiers = ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond']
+    print("   🚀 Inserimento massivo in Postgres...")
+    start_time = time.time()
+    
+    # Inserimento veloce tramite batch
+    args_str = ','.join(cur.mogrify("(%s,%s,%s)", (i, round(random.uniform(0.0, 0.4), 2), random.choice(tiers))).decode('utf-8') for i in range(1, users_count + 1))
+    cur.execute("INSERT INTO registry (user_id, discount_rate, tier) VALUES " + args_str)
+    
+    cur.execute("INSERT INTO registry (user_id, discount_rate, tier) VALUES (12345, 0.50, 'VIP') ON CONFLICT DO NOTHING;")
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f"   ✅ Popolamento Postgres completato in {time.time() - start_time:.2f} secondi!")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--users', type=int, default=10000)
+    populate_postgres(parser.parse_args().users)
+
+========================================
+FILE: ./prometheus/prometheus.yml
+========================================
+
+global:
+  scrape_interval: 1s
+  evaluation_interval: 1s
+
+scrape_configs:
+  - job_name: 'flink-jobmanager'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['flink-jobmanager:9249']
+
+  - job_name: 'flink-taskmanager'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['flink-taskmanager:9249']

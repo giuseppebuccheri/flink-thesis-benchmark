@@ -8,6 +8,7 @@ __pycache__/
 .vscode/
 .idea/
 .venv
+.repomix/
 
 # Eventuali file di log locali
 *.log
