@@ -1,5 +1,0 @@
-Action,IO_Mode,Throughput_cc,GC_Time_ms,Sink_Throughput
-filter,data_to_data,31778.31,53.0,25944.55
-aggregate,data_to_state,19774.88,139.0,19057.73
-join_stream,data_to_data,30915.74,3960.0,10338.28
-enrichment,state_to_data,21569.94,321.0,21570.15

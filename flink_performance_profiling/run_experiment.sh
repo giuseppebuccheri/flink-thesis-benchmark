@@ -30,16 +30,16 @@ init_infrastructure() {
 
 setup_databases() {
     log "Waiting for databases to be ready..."
-    sleep 5 # Piccolo buffer
+    sleep 5
 
     log "Setting up Postgres schema..."
-    # Creiamo la tabella per l'Aggregate in Postgres e la svuotiamo se esiste già
+    # creazione tabella per l'Aggregate in Postgres e la svuotiamo se esiste già
     docker exec postgres-state psql -U flinkuser -d benchmark_db -c "
         CREATE TABLE IF NOT EXISTS user_metrics (user_id BIGINT PRIMARY KEY, n_events BIGINT);
         TRUNCATE TABLE user_metrics;
     " >/dev/null 2>&1
     
-    # Mantengo anche lo schema di Cassandra se vuoi tenerlo acceso
+    # cassandra (tolto)
     docker exec cassandra-state cqlsh -e "
         CREATE KEYSPACE IF NOT EXISTS benchmark_ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
         USE benchmark_ks;

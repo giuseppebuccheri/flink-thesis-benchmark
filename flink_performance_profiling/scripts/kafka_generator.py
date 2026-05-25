@@ -2,11 +2,11 @@ import json
 import time
 import argparse
 import random
+from datetime import datetime, timedelta
 from kafka import KafkaProducer
 from kafka.admin import KafkaAdminClient, NewTopic
 import uuid
 
-# CONFIGURAZIONE
 BOOTSTRAP_SERVERS = ['localhost:9092']
 TOPIC_EVENTS      = 'sensor_events'
 TOPIC_PURCHASES   = 'purchases'
@@ -22,9 +22,9 @@ def setup_topics(admin_client, topics):
     if topics_to_create:
         try:
             admin_client.create_topics(new_topics=topics_to_create, validate_only=False)
-            print(f"✅ Topic creati: {[t.name for t in topics_to_create]}")
+            print(f"Topic creati: {[t.name for t in topics_to_create]}")
         except Exception as e:
-            print(f"⚠️ Errore creazione topic: {e}")
+            print(f"Errore creazione topic: {e}")
 
 
 # argparse per i parametri dinamici
@@ -52,57 +52,38 @@ producer = KafkaProducer(
 )
 
 print(f"============================================================")
-print(f"[STREAMING MODE] Generazione Dinamica Eventi in corso...")
-print(f"Volume Totale      : {args.events:,} eventi (Topic: {TOPIC_EVENTS})")
-print(f"Cardinalità Utenti : {args.users:,} utenti unici")
-print(f"Selectivity Filter : {args.selectivity * 100:.1f}% per user_id {args.target_user}")
-if args.join_rate > 0:
-    print(f"Join Correlation   : {args.join_rate * 100:.1f}% (Topic: {TOPIC_PURCHASES})")
+print(f"[STREAMING MODE] Generazione Dinamica Temperature IoT in corso...")
+print(f"Volume Totale      : {args.events:,} letture (Topic: {TOPIC_EVENTS})")
+print(f"Sensori Unici      : {args.users:,}")
 print(f"============================================================\n")
 
 start_time = time.time()
 events_sent = 0
-purchases_sent = 0
+
+# Base time per simulare 1 giorno
+current_time = datetime(2026, 5, 20, 8, 0, 0)
 
 for i in range(args.events):
-    # 1. Logica Selectivity
-    if random.random() < args.selectivity:
-        uid = args.target_user
-    else:
-        uid = random.randint(1, args.users)
-        if uid == args.target_user:
-            uid += 1
+    # Genera una temperatura casuale tra 18.5 e 32.0
+    temp = round(random.uniform(18.5, 32.0), 2)
     
-    # 2. Generazione Evento Principale
-    event_id = i
     event = {
-        "user_id": uid,
-        "event_id": event_id,
-        "ts": "2026-01-01 10:00:00",
-        "event_type": random.choice(["click", "view", "share"]),
-        "amount": round(random.uniform(1.0, 50.0), 2)
+        "sensor_id": 1,
+        "ts": current_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "temperature": temp
     }
+    
     producer.send(TOPIC_EVENTS, event)
     events_sent += 1
-
-    # 3. Logica Join / Correlazione
-    if args.join_rate > 0 and random.random() < args.join_rate:
-        purchase = {
-            "user_id": uid, # Chiave di Join
-            "related_event_id": event_id,
-            "purchase_id": str(uuid.uuid4()), # Questo non va ancora a Flink, può restare UUID
-            "status": "completed"
-        }
-        producer.send(TOPIC_PURCHASES, purchase)
-        purchases_sent += 1
+    
+    current_time += timedelta(seconds=1)
 
     # Logging
-    if (i + 1) % 100_000 == 0:
+    if (i + 1) % 20_000 == 0:
         elapsed = time.time() - start_time
-        rate = (events_sent + purchases_sent) / elapsed
-        print(f"  {events_sent:,} eventi base | {purchases_sent:,} acquisti correlati | avg rate: {rate:,.0f} msg/s")
+        rate = events_sent / elapsed
+        print(f"  {events_sent:,} letture inviate | avg rate: {rate:,.0f} msg/s")
 
 producer.flush()
 elapsed = time.time() - start_time
-total_sent = events_sent + purchases_sent
-print(f"\n✅ Fine: {total_sent:,} messaggi totali in {elapsed:.2f}s ({total_sent / elapsed:,.0f} msg/s avg)")
+print(f"\n✅ Fine: {events_sent:,} messaggi totali in {elapsed:.2f}s ({events_sent / elapsed:,.0f} msg/s avg)")

@@ -5,15 +5,15 @@ from pyflink.table import EnvironmentSettings, TableEnvironment
 # TABLES DEFINITIONS
 # ============================================================================
 
+#Sources
+
 def create_kafka_source(t_env):
     t_env.execute_sql("""
         CREATE TABLE events (
-            user_id BIGINT,
-            event_id BIGINT,
+            sensor_id BIGINT,
             ts STRING,
-            event_type STRING,
-            amount DOUBLE,
-            proctime AS PROCTIME() -- Necessario per la Lookup Join
+            temperature DOUBLE,
+            proctime AS PROCTIME()
         ) WITH (
             'connector' = 'kafka',
             'topic' = 'sensor_events',
@@ -25,13 +25,14 @@ def create_kafka_source(t_env):
     """)
 
 def create_kafka_source_purchases(t_env):
+    """Source Kafka per eventi di acquisto, usata nello Stream-to-Stream Join"""
     t_env.execute_sql("""
         CREATE TABLE purchases (
             user_id BIGINT,
             related_event_id BIGINT,
             purchase_id STRING,
             status STRING,
-            proctime AS PROCTIME() -- AGGIUNTO PER LA INTERVAL JOIN
+            proctime AS PROCTIME()
         ) WITH (
             'connector' = 'kafka',
             'topic' = 'purchases',
@@ -43,7 +44,7 @@ def create_kafka_source_purchases(t_env):
     """)
 
 def create_postgres_lookup_source(t_env):
-    """Tabella di lookup su Postgres per il test STATE_TO_DATA"""
+    """Source per arricchimento da Postgres, usata nell'Enrichment (Lookup Join)"""
     t_env.execute_sql("""
         CREATE TABLE user_registry (
             user_id BIGINT,
@@ -60,6 +61,8 @@ def create_postgres_lookup_source(t_env):
             'lookup.cache.ttl' = '10 min'
         )
     """)
+
+#Sinks
 
 def create_kafka_sink(t_env, topic_name, schema):
     """Per stream Append-Only (Filter, Join, Enrichment)"""
@@ -110,11 +113,49 @@ def create_state_sink(t_env):
 # ============================================================================
 
 def run_filter(t_env, io_mode):
-    """Filter (Stateless) - Solo Data-to-Data"""
+    """Filter (Stateless) - DATA-to-DATA (Temperature IoT)"""
     create_kafka_source(t_env)
-    create_kafka_sink(t_env, 'sink_filter', 'user_id BIGINT, event_id BIGINT, amount DOUBLE')
+    create_kafka_sink(t_env, 'sink_filter', 'sensor_id BIGINT, ts STRING, temperature DOUBLE')
+    return "INSERT INTO kafka_sink SELECT sensor_id, ts, temperature FROM events WHERE temperature > 30.0"
+
+def run_filter_stateful(t_env, io_mode):
+    """Filter - DATA-to-STATE (Temperature IoT su Postgres)"""
     
-    return "INSERT INTO kafka_sink SELECT user_id, event_id, amount FROM events WHERE amount > 10.0"
+    # Source Kafka
+    t_env.execute_sql("""
+        CREATE TABLE events_stateful (
+            sensor_id BIGINT,
+            ts STRING,
+            temperature DOUBLE,
+            proctime AS PROCTIME()
+        ) WITH (
+            'connector' = 'kafka',
+            'topic' = 'sensor_events',
+            'properties.bootstrap.servers' = 'kafka:29092',
+            'properties.group.id' = 'benchmark-group-iot-state',
+            'scan.startup.mode' = 'earliest-offset',
+            'format' = 'json'
+        )
+    """)
+    
+    # Sink Postgres
+    t_env.execute_sql("""
+        CREATE TABLE extreme_heat_alerts (
+            sensor_id BIGINT,
+            ts STRING,
+            temperature DOUBLE,
+            PRIMARY KEY (sensor_id, ts) NOT ENFORCED
+        ) WITH (
+            'connector' = 'jdbc',
+            'url' = 'jdbc:postgresql://postgres-state:5432/benchmark_db',
+            'table-name' = 'extreme_heat_alerts',
+            'username' = 'flinkuser',
+            'password' = 'flinkpassword'
+        )
+    """)
+    
+    # query
+    return "INSERT INTO extreme_heat_alerts SELECT sensor_id, ts, temperature FROM events_stateful WHERE temperature > 30.0"
 
 def run_aggregate(t_env, io_mode):
     """Aggregate (Stateful) - Data-to-Data vs Data-to-State"""
@@ -157,10 +198,6 @@ def run_enrichment(t_env, io_mode):
         ON e.user_id = r.user_id
     """
 
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
-
 if __name__ == '__main__':
     if len(sys.argv) < 3:
         print("\nErrore: Specifica azione e modalità I/O")
@@ -173,8 +210,10 @@ if __name__ == '__main__':
     t_env = TableEnvironment.create(env_settings)
     t_env.get_config().set("pipeline.jars", "file:///opt/flink/lib/flink-sql-connector-kafka-3.1.0-1.18.jar")
     
+    # Mappa delle azioni alle rispettive funzioni
     action_map = {
         'filter': run_filter,
+        'filter_stateful': run_filter_stateful,
         'aggregate': run_aggregate,
         'join_stream': run_join_stream,
         'enrichment': run_enrichment

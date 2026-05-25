@@ -12,3 +12,5 @@ __pycache__/
 
 # Eventuali file di log locali
 *.log
+flink_performance_profiling/repomix-output.xml
+flink_performance_profiling/codice_tesi.txt
